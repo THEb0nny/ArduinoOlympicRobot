@@ -1,6 +1,7 @@
 // https://github.com/GyverLibs/uPID
 // https://github.com/GyverLibs/GyverMotor
 
+#include "advmotctrls.h"
 #include <PinChangeInterrupt.h>
 #include <uPID.h>
 #include <GyverMotor2.h>
@@ -24,15 +25,12 @@
 
 #define AVG_WINDOW 5 // Количество измерений для усреднения
 
-struct MotorsPower {
-  float pwrLeft;
-  float pwrRight;
-};
-
 volatile long motLeftEncCount = 0; // Cчетчик позиций
 volatile long motRightEncCount = 0;
 volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
 volatile int8_t motRightLastEncoded = 0;
+
+
 
 GMotor2<DRIVER2WIRE> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
 GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
@@ -97,16 +95,6 @@ void setup() {
   syncPid.setKd(0);
 }
 
-float getErrorSyncMotorsAtPwr(int eLeft, int eRight, int vLeft, int vRight) {
-  return (vRight * eLeft) - (vLeft * eRight);
-}
-
-MotorsPower getPwrSyncMotorsAtPwr(float u, int vLeft, int vRight) {
-  float pLeft = vLeft - (abs(vRight + 1) - abs(vRight)) * u;
-  float pRight = vRight + (abs(vLeft + 1) - abs(vLeft)) * u;
-  return {pLeft, pRight};
-}
-
 void setPwrCommand(float pLeft, float pRight) {
   leftMotor.setSpeed(pLeft);
   rightMotor.setSpeed(pRight);
@@ -129,10 +117,10 @@ void loop() {
   long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
   interrupts();
 
-  float syncError = getErrorSyncMotorsAtPwr(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
+  float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
   syncPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
   float syncU = syncPid.compute(-syncError); // Получить управляющее воздействие от регулятора
-  MotorsPower powers = getPwrSyncMotorsAtPwr(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+  advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
   setPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
 
   Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
