@@ -1,0 +1,189 @@
+// https://github.com/GyverLibs/uPID
+// https://github.com/GyverLibs/GyverMotor
+
+#include <PinChangeInterrupt.h>
+#include <uPID.h>
+#include <GyverMotor2.h>
+
+// Настройки пинов
+#define MOT_LEFT_ENC_A_PIN 2
+#define MOT_LEFT_ENC_B_PIN 3
+
+#define MOT_RIGHT_ENC_A_PIN 8
+#define MOT_RIGHT_ENC_B_PIN 9
+
+#define MOT_LEFT_PWR_PIN 6
+#define MOT_LEFT_DIR_PIN 7
+
+#define MOT_RIGHT_PWR_PIN 5
+#define MOT_RIGHT_DIR_PIN 4
+
+#define ENCODER_CPR 65 // Физическое разрешение
+#define QUAD_MULTIPLIER 4 // Квадратурное умножение
+#define TICKS_PER_REV (ENCODER_CPR * QUAD_MULTIPLIER) // 260
+
+#define AVG_WINDOW 5 // Количество измерений для усреднения
+
+struct MotorsPower {
+  float pwrLeft;
+  float pwrRight;
+};
+
+volatile long motLeftEncCount = 0; // Cчетчик позиций
+volatile long motRightEncCount = 0;
+volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
+volatile int8_t motRightLastEncoded = 0;
+
+GMotor2<DRIVER2WIRE> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
+GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
+
+uPID syncPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+
+int v = 100;
+
+// Универсальный обработчик ----------
+inline void updateMotorEncoder(const uint8_t pinA, const uint8_t pinB, volatile long* counter, volatile int8_t* lastEncoded) {
+  // Считываем состояние каналов
+  const int8_t MSB = digitalRead(pinA);
+  const int8_t LSB = digitalRead(pinB);
+
+  int8_t encoded = (MSB << 1) | LSB;
+  int8_t sum = ((*lastEncoded << 2) | encoded);
+
+  if (sum == 0b0001 || sum == 0b0111 || sum == 0b1110 || sum == 0b1000)
+    (*counter)++;
+  else if (sum == 0b0010 || sum == 0b0100 || sum == 0b1101 || sum == 0b1011)
+    (*counter)--;
+
+  *lastEncoded = encoded;
+}
+
+// Обёртки для attachInterrupt
+void ISR_leftEncoder() {
+  updateMotorEncoder(MOT_LEFT_ENC_A_PIN, MOT_LEFT_ENC_B_PIN, &motLeftEncCount, &motLeftLastEncoded);
+}
+void ISR_rightEncoder() { 
+  updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &motRightEncCount, &motRightLastEncoded); 
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(MOT_LEFT_ENC_A_PIN, INPUT_PULLUP);
+  pinMode(MOT_LEFT_ENC_B_PIN, INPUT_PULLUP);
+  pinMode(MOT_RIGHT_ENC_A_PIN, INPUT_PULLUP);
+  pinMode(MOT_RIGHT_ENC_B_PIN, INPUT_PULLUP);
+
+  // Настроить прерывания
+  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_A_PIN), ISR_leftEncoder, CHANGE); // Стандартное прерывание
+  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_B_PIN), ISR_leftEncoder, CHANGE); // Стандартное прерывание
+  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_A_PIN), ISR_rightEncoder, CHANGE); // Дополнительное прерывание
+  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_B_PIN), ISR_rightEncoder, CHANGE); // Дополнительное прерывание
+
+  leftMotor.setMinDuty(70);
+  rightMotor.setMinDuty(70);
+
+  leftMotor.reverse(false);
+  rightMotor.reverse(false);
+
+  leftMotor.setDeadtime(5);
+  rightMotor.setDeadtime(5);
+
+  syncPid.outMax = 255;
+  syncPid.outMin = -255;
+
+  syncPid.setKp(0.1);
+  syncPid.setKi(0);
+  syncPid.setKd(0);
+}
+
+float getErrorSyncMotorsAtPwr(int eLeft, int eRight, int vLeft, int vRight) {
+  return (vRight * eLeft) - (vLeft * eRight);
+}
+
+MotorsPower getPwrSyncMotorsAtPwr(float u, int vLeft, int vRight) {
+  float pLeft = vLeft - (abs(vRight + 1) - abs(vRight)) * u;
+  float pRight = vRight + (abs(vLeft + 1) - abs(vLeft)) * u;
+  return {pLeft, pRight};
+}
+
+void setPwrCommand(float pLeft, float pRight) {
+  leftMotor.setSpeed(pLeft);
+  rightMotor.setSpeed(pRight);
+}
+
+void loop() {
+  static long prevEncLeft = 0, prevEncRight = 0;
+  static long prevEncLeftCount = 0, prevEncRightCount = 0;
+  static long prevTime = 0;
+
+  // Очереди для усреднения
+  // static float leftBuf[AVG_WINDOW] = {0}, rightBuf[AVG_WINDOW] = {0};
+  // static uint8_t bufIndex = 0;
+
+  unsigned long currTime = millis();
+  float dt = (currTime - prevTime);
+  prevTime = currTime;
+
+  noInterrupts();
+  long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
+  interrupts();
+
+  float syncError = getErrorSyncMotorsAtPwr(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
+  syncPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+  float syncU = syncPid.compute(-syncError); // Получить управляющее воздействие от регулятора
+  MotorsPower powers = getPwrSyncMotorsAtPwr(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+  setPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
+
+  Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
+  prevEncLeft = currEncLeft;
+  prevEncRight = currEncRight;
+
+  delay(1);
+
+  // if (currEncLeft != prevEncLeft || currEncRight != prevEncRight) {
+  //   Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
+  //   prevEncLeft = currEncLeft;
+  //   prevEncRight = currEncRight;
+  // }
+
+  /*
+  // Каждые 100 мс считаем скорость
+  if (currTime - prevTime >= 100) {
+    noInterrupts();
+    long currLeft = motLeftEncCount;
+    long currRight = motRightEncCount;
+    interrupts();
+
+    long dLeft = currLeft - prevEncLeftCount;
+    long dRight = currRight - prevEncRightCount;
+    prevEncLeftCount = currLeft;
+    prevEncRightCount = currRight;
+
+    float dt = (currTime - prevTime) / 1000.0f; // в секундах
+    prevTime = currTime;
+
+    float leftRPS = dLeft / (float)TICKS_PER_REV / dt;
+    float rightRPS = dRight / (float)TICKS_PER_REV / dt;
+
+    float leftRPM = leftRPS * 60.0f;
+    float rightRPM = rightRPS * 60.0f;
+
+    // Добавляем в буфер
+    leftBuf[bufIndex] = leftRPM;
+    rightBuf[bufIndex] = rightRPM;
+    bufIndex = (bufIndex + 1) % AVG_WINDOW;
+
+    // Вычисляем среднее
+    float avgLeft = 0, avgRight = 0;
+    for (uint8_t i = 0; i < AVG_WINDOW; i++) {
+      avgLeft += leftBuf[i];
+      avgRight += rightBuf[i];
+    }
+    avgLeft /= AVG_WINDOW;
+    avgRight /= AVG_WINDOW;
+
+    // Serial.println("speed: " + String(avgLeft) + "\t" + String(avgRight));
+  }
+  */
+}
