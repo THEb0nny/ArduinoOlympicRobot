@@ -30,8 +30,6 @@ volatile long motRightEncCount = 0;
 volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
 volatile int8_t motRightLastEncoded = 0;
 
-
-
 GMotor2<DRIVER2WIRE> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
 GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 
