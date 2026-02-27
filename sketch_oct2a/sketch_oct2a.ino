@@ -35,7 +35,7 @@ GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 
 uPID syncPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
 
-int v = 100;
+int v = 70;
 
 // Универсальный обработчик ----------
 inline void updateMotorEncoder(const uint8_t pinA, const uint8_t pinB, volatile long* counter, volatile int8_t* lastEncoded) {
@@ -88,7 +88,7 @@ void setup() {
   syncPid.outMax = 255;
   syncPid.outMin = -255;
 
-  syncPid.setKp(0.1);
+  syncPid.setKp(0.005);
   syncPid.setKi(0);
   syncPid.setKd(0);
 }
