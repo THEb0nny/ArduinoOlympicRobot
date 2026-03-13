@@ -19,9 +19,13 @@
 #define MOT_RIGHT_PWR_PIN 5
 #define MOT_RIGHT_DIR_PIN 4
 
-#define ENCODER_CPR 65 // Физическое разрешение
-#define QUAD_MULTIPLIER 4 // Квадратурное умножение
-#define TICKS_PER_REV (ENCODER_CPR * QUAD_MULTIPLIER) // 260
+#define MOTOR_GEAR_RATIO 45 // Соотношение редуктора мотора
+#define MOTOR_ENCODER_QUAD_MULTIPLIER 4 // Квадратурное умножение
+#define MOTOR_ENCODER_PPR 11 // Количество импульсов на одном канале (A или B) за один оборот
+#define MOTOR_ENCODER_CPR (MOTOR_ENCODER_PPR * MOTOR_ENCODER_QUAD_MULTIPLIER * MOTOR_GEAR_RATIO) // Итоговое разрешение системы (тиков на оборот выходного вала)
+
+#define WHEEL_DIAMETR 56 // Диаметр колёс в мм
+#define BASE_LENGTH 170 // Расстояние между центрами колёс в мм
 
 #define AVG_WINDOW 5 // Количество измерений для усреднения
 
@@ -33,9 +37,10 @@ volatile int8_t motRightLastEncoded = 0;
 GMotor2<DRIVER2WIRE> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
 GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 
-uPID syncPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+uPID syncChassisPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
 
-int v = 70;
+static long prevEncLeft = 0, prevEncRight = 0;
+static long prevEncLeftCount = 0, prevEncRightCount = 0;
 
 // Универсальный обработчик ----------
 inline void updateMotorEncoder(const uint8_t pinA, const uint8_t pinB, volatile long* counter, volatile int8_t* lastEncoded) {
@@ -78,54 +83,99 @@ void setup() {
 
   leftMotor.setMinDuty(70);
   rightMotor.setMinDuty(70);
-
   leftMotor.reverse(false);
   rightMotor.reverse(false);
-
   leftMotor.setDeadtime(5);
   rightMotor.setDeadtime(5);
 
-  syncPid.outMax = 255;
-  syncPid.outMin = -255;
+  syncChassisPid.outMin = -255;
+  syncChassisPid.outMax = 255;
+  syncChassisPid.setKp(0.005);
+  syncChassisPid.setKi(0);
+  syncChassisPid.setKd(0);
 
-  syncPid.setKp(0.005);
-  syncPid.setKi(0);
-  syncPid.setKd(0);
+  solve();
 }
 
-void setPwrCommand(float pLeft, float pRight) {
+void chassisSetPwrCommand(float pLeft, float pRight) {
   leftMotor.setSpeed(pLeft);
   rightMotor.setSpeed(pRight);
 }
 
+void chassisBreakStop() {
+  leftMotor.brake();
+  rightMotor.brake();
+}
+
+void chassisFloatStop() {
+  leftMotor.stop();
+  rightMotor.stop();
+}
+
+// Вспомогательная функция расчёта движения на дистанцию в мм
+float calculateDistanceToEncRotate(int distance) {
+  return (distance / (PI * WHEEL_DIAMETR)) * MOTOR_ENCODER_CPR; // Дистанция в мм, которую нужно пройти
+}
+
+// Вспомогательная функция расчёта поворота в градусах
+float calculateRotateToEncRotate(float degrees) {
+  return ((degrees * BASE_LENGTH) / WHEEL_DIAMETR) * ((float) MOTOR_ENCODER_CPR / 360.0);
+}
+
+void linearDistMove(int value, int v) {
+  unsigned long int prevTime = millis();
+  while(true) {
+    unsigned long currTime = millis();
+    float dt = currTime - prevTime;
+    prevTime = currTime;
+
+    noInterrupts();
+    long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
+    interrupts();
+
+    if ((currEncLeft + currEncRight) / 2 >= value) break;
+    float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
+    syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
+    advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+    chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
+    Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
+  }
+  chassisFloatStop();
+}
+
+void solve() {
+  linearDistMove(1980, 150);
+}
+
 void loop() {
-  static long prevEncLeft = 0, prevEncRight = 0;
-  static long prevEncLeftCount = 0, prevEncRightCount = 0;
-  static long prevTime = 0;
+  // static long prevEncLeft = 0, prevEncRight = 0;
+  // static long prevEncLeftCount = 0, prevEncRightCount = 0;
+  // static long prevTime = 0;
+
+  // unsigned long currTime = millis();
+  // float dt = (currTime - prevTime);
+  // prevTime = currTime;
+
+  // noInterrupts();
+  // long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
+  // interrupts();
+
+  // float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
+  // syncPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+  // float syncU = syncPid.compute(-syncError); // Получить управляющее воздействие от регулятора
+  // advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+  // setPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
+
+  // Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
+  // prevEncLeft = currEncLeft;
+  // prevEncRight = currEncRight;
+
+  // delay(1);
 
   // Очереди для усреднения
   // static float leftBuf[AVG_WINDOW] = {0}, rightBuf[AVG_WINDOW] = {0};
   // static uint8_t bufIndex = 0;
-
-  unsigned long currTime = millis();
-  float dt = (currTime - prevTime);
-  prevTime = currTime;
-
-  noInterrupts();
-  long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
-  interrupts();
-
-  float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
-  syncPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-  float syncU = syncPid.compute(-syncError); // Получить управляющее воздействие от регулятора
-  advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
-  setPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-
-  Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
-  prevEncLeft = currEncLeft;
-  prevEncRight = currEncRight;
-
-  delay(1);
 
   // if (currEncLeft != prevEncLeft || currEncRight != prevEncRight) {
   //   Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
