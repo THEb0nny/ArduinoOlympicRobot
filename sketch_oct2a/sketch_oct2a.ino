@@ -29,8 +29,8 @@
 
 #define AVG_WINDOW 5 // Количество измерений для усреднения
 
-volatile long motLeftEncCount = 0; // Cчетчик позиций
-volatile long motRightEncCount = 0;
+volatile long encMotorLeftCount = 0; // Cчетчик позиций
+volatile long encMotorRightCount = 0;
 volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
 volatile int8_t motRightLastEncoded = 0;
 
@@ -61,10 +61,10 @@ inline void updateMotorEncoder(const uint8_t pinA, const uint8_t pinB, volatile 
 
 // Обёртки для attachInterrupt
 void ISR_leftEncoder() {
-  updateMotorEncoder(MOT_LEFT_ENC_A_PIN, MOT_LEFT_ENC_B_PIN, &motLeftEncCount, &motLeftLastEncoded);
+  updateMotorEncoder(MOT_LEFT_ENC_A_PIN, MOT_LEFT_ENC_B_PIN, &encMotorLeftCount, &motLeftLastEncoded);
 }
 void ISR_rightEncoder() { 
-  updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &motRightEncCount, &motRightLastEncoded); 
+  updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
 }
 
 void setup() {
@@ -123,6 +123,11 @@ float calculateRotateToEncRotate(float degrees) {
 }
 
 void linearDistMove(int value, int v) {
+  long emlPrev = encMotorLeftCount;
+  long emrPrev = encMotorRightCount;
+
+  float motRotateCalc = calculateDistanceToEncRotate(value);
+
   unsigned long int prevTime = millis();
   while(true) {
     unsigned long currTime = millis();
@@ -130,10 +135,11 @@ void linearDistMove(int value, int v) {
     prevTime = currTime;
 
     noInterrupts();
-    long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
+    long eml = encMotorLeftCount - emlPrev;
+    long emr = encMotorRightCount - emrPrev;
     interrupts();
 
-    if ((currEncLeft + currEncRight) / 2 >= value) break;
+    if ((eml + emr) / 2 >= motRotateCalc) break;
     float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
     syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
     float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
@@ -153,26 +159,6 @@ void loop() {
   // static long prevEncLeftCount = 0, prevEncRightCount = 0;
   // static long prevTime = 0;
 
-  // unsigned long currTime = millis();
-  // float dt = (currTime - prevTime);
-  // prevTime = currTime;
-
-  // noInterrupts();
-  // long currEncLeft = motLeftEncCount, currEncRight = motRightEncCount;
-  // interrupts();
-
-  // float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
-  // syncPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-  // float syncU = syncPid.compute(-syncError); // Получить управляющее воздействие от регулятора
-  // advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
-  // setPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-
-  // Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
-  // prevEncLeft = currEncLeft;
-  // prevEncRight = currEncRight;
-
-  // delay(1);
-
   // Очереди для усреднения
   // static float leftBuf[AVG_WINDOW] = {0}, rightBuf[AVG_WINDOW] = {0};
   // static uint8_t bufIndex = 0;
@@ -187,8 +173,8 @@ void loop() {
   // Каждые 100 мс считаем скорость
   if (currTime - prevTime >= 100) {
     noInterrupts();
-    long currLeft = motLeftEncCount;
-    long currRight = motRightEncCount;
+    long currLeft = encMotorLeftCount;
+    long currRight = encMotorRightCount;
     interrupts();
 
     long dLeft = currLeft - prevEncLeftCount;
