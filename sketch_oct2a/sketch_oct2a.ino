@@ -1,10 +1,12 @@
 // https://github.com/GyverLibs/uPID
 // https://github.com/GyverLibs/GyverMotor
+// https://github.com/NicoHood/PinChangeInterrupt
 
 #include "advmotctrls.h"
 #include <PinChangeInterrupt.h>
 #include <uPID.h>
 #include <GyverMotor2.h>
+#include <EncButton.h>
 
 // Настройки пинов
 #define MOT_LEFT_ENC_A_PIN 2
@@ -19,13 +21,17 @@
 #define MOT_RIGHT_PWR_PIN 5
 #define MOT_RIGHT_DIR_PIN 4
 
-#define MOTOR_GEAR_RATIO 45 // Соотношение редуктора мотора
-#define MOTOR_ENCODER_QUAD_MULTIPLIER 4 // Квадратурное умножение
-#define MOTOR_ENCODER_PPR 11 // Количество импульсов на одном канале (A или B) за один оборот
-#define MOTOR_ENCODER_CPR (MOTOR_ENCODER_PPR * MOTOR_ENCODER_QUAD_MULTIPLIER * MOTOR_GEAR_RATIO) // Итоговое разрешение системы (тиков на оборот выходного вала)
+#define BTN_PIN 12
 
-#define WHEEL_DIAMETR 56 // Диаметр колёс в мм
+#define MOTOR_GEAR_RATIO 45 // Соотношение редуктора мотора
+#define MOTOR_ENCODER_MULTIPLIER 4 // Квадратурное умножение
+#define MOTOR_ENCODER_PPR 11 // Количество импульсов на одном канале (A или B) за один оборот
+#define MOTOR_ENCODER_CPR (MOTOR_ENCODER_PPR * MOTOR_ENCODER_MULTIPLIER * MOTOR_GEAR_RATIO) // Итоговое разрешение системы (тиков на оборот выходного вала)
+
+#define WHEEL_DIAMETR 86.5 // Диаметр колёс в мм
 #define BASE_LENGTH 170 // Расстояние между центрами колёс в мм
+
+#define MM_TO_ENC (MOTOR_ENCODER_CPR / (PI * WHEEL_DIAMETR))
 
 #define AVG_WINDOW 5 // Количество измерений для усреднения
 
@@ -37,34 +43,42 @@ volatile int8_t motRightLastEncoded = 0;
 GMotor2<DRIVER2WIRE> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
 GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 
+Button btn(BTN_PIN, INPUT, LOW);
+
 uPID syncChassisPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
 
 static long prevEncLeft = 0, prevEncRight = 0;
 static long prevEncLeftCount = 0, prevEncRightCount = 0;
 
-// Универсальный обработчик ----------
+// Универсальный обработчик считываний с энкодеров
 inline void updateMotorEncoder(const uint8_t pinA, const uint8_t pinB, volatile long* counter, volatile int8_t* lastEncoded) {
   // Считываем состояние каналов
   const int8_t MSB = digitalRead(pinA);
   const int8_t LSB = digitalRead(pinB);
-
   int8_t encoded = (MSB << 1) | LSB;
   int8_t sum = ((*lastEncoded << 2) | encoded);
-
-  if (sum == 0b0001 || sum == 0b0111 || sum == 0b1110 || sum == 0b1000)
+  if (sum == 0b0001 || sum == 0b0111 || sum == 0b1110 || sum == 0b1000) {
     (*counter)++;
-  else if (sum == 0b0010 || sum == 0b0100 || sum == 0b1101 || sum == 0b1011)
+  } else if (sum == 0b0010 || sum == 0b0100 || sum == 0b1101 || sum == 0b1011) {
     (*counter)--;
-
+  }
   *lastEncoded = encoded;
 }
 
 // Обёртки для attachInterrupt
-void ISR_leftEncoder() {
+void leftEncoderInterrupt() {
   updateMotorEncoder(MOT_LEFT_ENC_A_PIN, MOT_LEFT_ENC_B_PIN, &encMotorLeftCount, &motLeftLastEncoded);
 }
-void ISR_rightEncoder() { 
+void rightEncoderInterrupt() { 
   updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
+}
+
+void buttonInterrupt() {
+  btn.pressISR();
+}
+
+ISR(TIMER1_COMPA_vect) {
+  btn.tick();
 }
 
 void setup() {
@@ -76,10 +90,13 @@ void setup() {
   pinMode(MOT_RIGHT_ENC_B_PIN, INPUT_PULLUP);
 
   // Настроить прерывания
-  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_A_PIN), ISR_leftEncoder, CHANGE); // Стандартное прерывание
-  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_B_PIN), ISR_leftEncoder, CHANGE); // Стандартное прерывание
-  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_A_PIN), ISR_rightEncoder, CHANGE); // Дополнительное прерывание
-  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_B_PIN), ISR_rightEncoder, CHANGE); // Дополнительное прерывание
+  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_A_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
+  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_B_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
+  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_A_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
+  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_B_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
+  // attachPCINT(digitalPinToPCINT(BTN_PIN), buttonInterrupt, FALLING); // Дополнительное прерывание на кнопку
+  // Если кнопка замыкает LOW - прерывание FALLING
+  // Если кнопка замыкает HIGH - прерывание RISING
 
   leftMotor.setMinDuty(70);
   rightMotor.setMinDuty(70);
@@ -105,6 +122,8 @@ void chassisSetPwrCommand(float pLeft, float pRight) {
 void chassisBreakStop() {
   leftMotor.brake();
   rightMotor.brake();
+  delay(10);
+  chassisFloatStop();
 }
 
 void chassisFloatStop() {
@@ -113,20 +132,20 @@ void chassisFloatStop() {
 }
 
 // Вспомогательная функция расчёта движения на дистанцию в мм
-float calculateDistanceToEncRotate(int distance) {
-  return (distance / (PI * WHEEL_DIAMETR)) * MOTOR_ENCODER_CPR; // Дистанция в мм, которую нужно пройти
+float distanceToTicks(int distance) {
+  return distance * MM_TO_ENC; // Дистанция в мм, которую нужно пройти
 }
 
 // Вспомогательная функция расчёта поворота в градусах
-float calculateRotateToEncRotate(float degrees) {
-  return ((degrees * BASE_LENGTH) / WHEEL_DIAMETR) * ((float) MOTOR_ENCODER_CPR / 360.0);
+float turnToTicks(float degrees) {
+  return (PI * BASE_LENGTH * degrees / 360.0) * MM_TO_ENC;
 }
 
 void linearDistMove(int value, int v) {
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
 
-  float motRotateCalc = calculateDistanceToEncRotate(value);
+  float motRotateCalc = round(distanceToTicks(value));
 
   unsigned long int prevTime = millis();
   while(true) {
@@ -139,19 +158,47 @@ void linearDistMove(int value, int v) {
     long emr = encMotorRightCount - emrPrev;
     interrupts();
 
-    if ((eml + emr) / 2 >= motRotateCalc) break;
-    float syncError = advmotctrls::getErrorSyncMotors(currEncLeft, currEncRight, v, v); // Найдите ошибку в управлении двигателей
+    if ((abs(eml) + abs(emr)) / 2 >= motRotateCalc) break;
+    float syncError = advmotctrls::getErrorSyncMotors(eml, emr, v, v); // Найдите ошибку в управлении двигателей
     syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
     float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
     advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-    Serial.println(String(currEncLeft) + "\t" + String(currEncRight) + "\t" + String(syncError) + "\t" + String(syncU));
+    Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
   }
-  chassisFloatStop();
+  chassisBreakStop();
+}
+
+void spinTurn(int degrees, int v) {
+  long emlPrev = encMotorLeftCount;
+  long emrPrev = encMotorRightCount;
+
+  float motRotateCalc = round(turnToTicks(degrees));
+
+  unsigned long int prevTime = millis();
+  while(true) {
+    unsigned long currTime = millis();
+    float dt = currTime - prevTime;
+    prevTime = currTime;
+
+    noInterrupts();
+    long eml = encMotorLeftCount - emlPrev;
+    long emr = encMotorRightCount - emrPrev;
+    interrupts();
+
+    if ((abs(eml) + abs(emr)) / 2 >= motRotateCalc) break;
+    float syncError = advmotctrls::getErrorSyncMotors(eml, emr, v, v); // Найдите ошибку в управлении двигателей
+    syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
+    advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+    chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
+    Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
+  }
+  chassisBreakStop();
 }
 
 void solve() {
-  linearDistMove(1980, 150);
+  linearDistMove(100, 150);
 }
 
 void loop() {
