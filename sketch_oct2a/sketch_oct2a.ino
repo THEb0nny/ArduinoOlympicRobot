@@ -1,12 +1,14 @@
 // https://github.com/GyverLibs/uPID
 // https://github.com/GyverLibs/GyverMotor
 // https://github.com/NicoHood/PinChangeInterrupt
+// https://github.com/GyverLibs/GyverTimers
 
 #include "advmotctrls.h"
 #include <PinChangeInterrupt.h>
 #include <uPID.h>
 #include <GyverMotor2.h>
 #include <EncButton.h>
+#include <GyverTimers.h>
 
 // Настройки пинов
 #define MOT_LEFT_ENC_A_PIN 2
@@ -73,11 +75,8 @@ void rightEncoderInterrupt() {
   updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
 }
 
-void buttonInterrupt() {
-  btn.pressISR();
-}
-
-ISR(TIMER1_COMPA_vect) {
+// Прерывание таймера 2 на канал А
+ISR(TIMER2_A) {
   btn.tick();
 }
 
@@ -94,9 +93,9 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_B_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
   attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_A_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
   attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_B_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
-  // attachPCINT(digitalPinToPCINT(BTN_PIN), buttonInterrupt, FALLING); // Дополнительное прерывание на кнопку
-  // Если кнопка замыкает LOW - прерывание FALLING
-  // Если кнопка замыкает HIGH - прерывание RISING
+
+  Timer2.setPeriod(1000);
+  Timer2.enableISR(CHANNEL_A);
 
   leftMotor.setMinDuty(70);
   rightMotor.setMinDuty(70);
@@ -129,6 +128,12 @@ void chassisBreakStop() {
 void chassisFloatStop() {
   leftMotor.stop();
   rightMotor.stop();
+}
+
+void pauseUntilTime(unsigned long startTime, unsigned long delay) {
+  if (startTime == 0) startTime = millis();
+  unsigned long endTime = startTime + delay;
+  while (millis() - startTime < delay) delayMicroseconds(100);
 }
 
 // Вспомогательная функция расчёта движения на дистанцию в мм
@@ -164,18 +169,30 @@ void linearDistMove(int value, int v) {
     float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
     advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-    Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
+    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
+    pauseUntilTime(currTime, 1);
   }
   chassisBreakStop();
 }
 
-void spinTurn(int degrees, int v) {
+void spinTurn(int deg, int v) {
+  if (deg == 0 || v == 0) {
+    chassisBreakStop();
+    return;
+  }
+
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
 
-  float motRotateCalc = round(turnToTicks(degrees));
+  v = constrain(abs(v), 0, 255);
+
+  float calcMotRot = round(turnToTicks(deg));
+
+  const vLeft = deg < 0 ? -v : v;
+  const vRight = deg > 0 ? -v : v;
 
   unsigned long int prevTime = millis();
+  // unsigned long int startTime = millis();
   while(true) {
     unsigned long currTime = millis();
     float dt = currTime - prevTime;
@@ -186,13 +203,14 @@ void spinTurn(int degrees, int v) {
     long emr = encMotorRightCount - emrPrev;
     interrupts();
 
-    if ((abs(eml) + abs(emr)) / 2 >= motRotateCalc) break;
-    float syncError = advmotctrls::getErrorSyncMotors(eml, emr, v, v); // Найдите ошибку в управлении двигателей
+    if ((abs(eml) + abs(emr)) / 2 >= abs(calcMotRot)) break;
+    float syncError = advmotctrls::getErrorSyncMotors(eml, emr, vLeft, vRight); // Найдите ошибку в управлении двигателей
     syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
     float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
-    advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+    advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, vLeft, vRight); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-    Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
+    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
+    pauseUntilTime(currTime, 1);
   }
   chassisBreakStop();
 }
