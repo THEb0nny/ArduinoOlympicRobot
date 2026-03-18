@@ -1,5 +1,5 @@
 // https://github.com/GyverLibs/uPID
-// https://github.com/GyverLibs/GyverMotor
+// https://github.com/GyverLibs/GyverMotor2
 // https://github.com/NicoHood/PinChangeInterrupt
 // https://github.com/GyverLibs/GyverTimers
 
@@ -23,7 +23,7 @@
 #define MOT_RIGHT_PWR_PIN 5
 #define MOT_RIGHT_DIR_PIN 4
 
-#define BTN_PIN 12
+#define BTN_PIN 11
 
 #define MOTOR_GEAR_RATIO 45 // Соотношение редуктора мотора
 #define MOTOR_ENCODER_MULTIPLIER 4 // Квадратурное умножение
@@ -31,7 +31,7 @@
 #define MOTOR_ENCODER_CPR (MOTOR_ENCODER_PPR * MOTOR_ENCODER_MULTIPLIER * MOTOR_GEAR_RATIO) // Итоговое разрешение системы (тиков на оборот выходного вала)
 
 #define WHEEL_DIAMETR 86.5 // Диаметр колёс в мм
-#define BASE_LENGTH 170 // Расстояние между центрами колёс в мм
+#define BASE_LENGTH 200 // Расстояние между центрами колёс в мм
 
 #define MM_TO_ENC (MOTOR_ENCODER_CPR / (PI * WHEEL_DIAMETR))
 
@@ -42,12 +42,14 @@ volatile long encMotorRightCount = 0;
 volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
 volatile int8_t motRightLastEncoded = 0;
 
-GMotor2<DRIVER2WIRE> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
-GMotor2<DRIVER2WIRE> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
+GyverMotor2<GM2::DIR_PWM> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
+GyverMotor2<GM2::DIR_PWM> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 
 Button btn(BTN_PIN, INPUT, LOW);
 
 uPID syncChassisPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+uPID holdStopLeftMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+uPID holdStopRightMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
 
 static long prevEncLeft = 0, prevEncRight = 0;
 static long prevEncLeftCount = 0, prevEncRightCount = 0;
@@ -75,7 +77,7 @@ void rightEncoderInterrupt() {
   updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
 }
 
-// Прерывание таймера 2 на канал А
+// Прерывание таймера 2 на канал А (3 и 11 пины)
 ISR(TIMER2_A) {
   btn.tick();
 }
@@ -99,8 +101,8 @@ void setup() {
 
   leftMotor.setMinDuty(70);
   rightMotor.setMinDuty(70);
-  leftMotor.reverse(false);
-  rightMotor.reverse(false);
+  leftMotor.setReverse(false);
+  rightMotor.setReverse(false);
   leftMotor.setDeadtime(5);
   rightMotor.setDeadtime(5);
 
@@ -108,20 +110,56 @@ void setup() {
   syncChassisPid.outMax = 255;
   syncChassisPid.setKp(0.005);
   syncChassisPid.setKi(0);
-  syncChassisPid.setKd(0);
+  syncChassisPid.setKd(0.5);
+
+  holdStopLeftMotorPid.outMin = -255;
+  holdStopLeftMotorPid.outMax = 255;
+  holdStopLeftMotorPid.setKp(1);
+  holdStopLeftMotorPid.setKd(0);
+  holdStopLeftMotorPid.setpoint = 0;
+
+  holdStopRightMotorPid.outMin = -255;
+  holdStopRightMotorPid.outMax = 255;
+  holdStopRightMotorPid.setKp(1);
+  holdStopRightMotorPid.setKd(0);
+  holdStopRightMotorPid.setpoint = 0;
 
   solve();
 }
 
 void chassisSetPwrCommand(float pLeft, float pRight) {
-  leftMotor.setSpeed(pLeft);
-  rightMotor.setSpeed(pRight);
+  leftMotor.runSpeed(pLeft);
+  rightMotor.runSpeed(pRight);
 }
 
-void chassisBreakStop() {
-  leftMotor.brake();
-  rightMotor.brake();
+void chassisBreakStop(int dir) {
+  chassisSetPwrCommand(-dir * 255, -dir * 255);
   delay(10);
+  chassisFloatStop();
+}
+
+void chassisHoldStop(int brakeTime) {
+  long emlPrev = encMotorLeftCount;
+  long emrPrev = encMotorRightCount;
+
+  unsigned long int startTime = millis();
+  unsigned long int prevTime = millis();
+  while(millis() - startTime <= brakeTime) {
+    unsigned long currTime = millis();
+    float dt = currTime - prevTime;
+    prevTime = currTime;
+    noInterrupts();
+    long eml = encMotorLeftCount - emlPrev;
+    long emr = encMotorRightCount - emrPrev;
+    interrupts();
+    holdStopLeftMotorPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    holdStopRightMotorPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float leftU = holdStopLeftMotorPid.compute(eml); // Получить управляющее воздействие от регулятора
+    float rightU = holdStopRightMotorPid.compute(emr); // Получить управляющее воздействие от регулятора
+    chassisSetPwrCommand(leftU, rightU); // Установить скорости/мощности моторам
+    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(leftU) + "\t" + String(rightU));
+    pauseUntilTime(currTime, 1);
+  }
   chassisFloatStop();
 }
 
@@ -169,15 +207,17 @@ void linearDistMove(int value, int v) {
     float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
     advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
+    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU) + "\t" + String(powers.pwrLeft) + "\t" + String(powers.pwrRight));
     pauseUntilTime(currTime, 1);
   }
-  chassisBreakStop();
+  // int dir = (v > 0) ? 1 : -1;
+  // chassisBreakStop(dir);
+  chassisHoldStop(50);
 }
 
 void spinTurn(int deg, int v) {
   if (deg == 0 || v == 0) {
-    chassisBreakStop();
+    chassisFloatStop();
     return;
   }
 
@@ -188,8 +228,8 @@ void spinTurn(int deg, int v) {
 
   float calcMotRot = round(turnToTicks(deg));
 
-  const vLeft = deg < 0 ? -v : v;
-  const vRight = deg > 0 ? -v : v;
+  const int vLeft = deg < 0 ? -v : v;
+  const int vRight = deg > 0 ? -v : v;
 
   unsigned long int prevTime = millis();
   // unsigned long int startTime = millis();
@@ -212,14 +252,23 @@ void spinTurn(int deg, int v) {
     // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
     pauseUntilTime(currTime, 1);
   }
-  chassisBreakStop();
+  // int dir = (v > 0) ? 1 : -1;
+  // chassisBreakStop(dir);
+  chassisHoldStop(5000);
 }
 
 void solve() {
-  linearDistMove(100, 150);
+  Serial.println("Press to start");
+  while (!btn.pressing()) delay(1);
+  Serial.println("Start!");
+  // linearDistMove(100, 150);
+  // delay(1000);
+  // linearDistMove(100, -150);
+  spinTurn(-90, 255);
 }
 
 void loop() {
+  
   // static long prevEncLeft = 0, prevEncRight = 0;
   // static long prevEncLeftCount = 0, prevEncRightCount = 0;
   // static long prevTime = 0;
