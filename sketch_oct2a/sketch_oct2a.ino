@@ -1,6 +1,6 @@
+// https://github.com/NicoHood/PinChangeInterrupt
 // https://github.com/GyverLibs/uPID
 // https://github.com/GyverLibs/GyverMotor2
-// https://github.com/NicoHood/PinChangeInterrupt
 // https://github.com/GyverLibs/GyverTimers
 
 #include "advmotctrls.h"
@@ -147,7 +147,7 @@ void chassisFloatStop() {
 
 void pauseUntilTimeUs(unsigned long startTimeUs, unsigned long delayUs) {
   if (startTimeUs == 0) startTimeUs = micros();
-    while (micros() - startTimeUs < delayUs) delayMicroseconds(50);
+  while (micros() - startTimeUs < delayUs) delayMicroseconds(50);
 }
 
 // Вспомогательная функция расчёта движения на дистанцию в мм
@@ -167,8 +167,8 @@ void syncMovement(int vLeft, int vRight, float value, MoveUnit unit, MotionBraki
     chassisHoldStop(50);
     return;
   }
-  vLeft = constrain((int) vLeft, -100, 100); // Ограничиваем скорость левого мотора от -100 до 100 и отсекаем дробную часть
-  vRight = constrain((int) vRight, -100, 100); // Ограничиваем скорость правого мотора от -100 до 100 и отсекаем дробную часть
+  vLeft = constrain((int) vLeft, -255, 255); // Ограничиваем скорость левого мотора от -255 до 255 и отсекаем дробную часть
+  vRight = constrain((int) vRight, -255, 255); // Ограничиваем скорость правого мотора от -255 до 255 и отсекаем дробную часть
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
   long targetAngle = 0;
@@ -228,7 +228,7 @@ void linearDistMove(float dist, int v, MotionBraking braking) {
   if (v < 0) Serial.println("Warning: v is negative (" + String(v) + "). Using absolute value.");
   v = abs(v); // Модуль скорости
   int dirSign = (dist > 0) - (dist < 0);
-  long mRotCalc = round(distanceToTicks(abs(dist))); // аналог Math.distanceToTicks
+  long mRotCalc = round(distanceToTicks(abs(dist)));
   syncMovement(v * dirSign, v * dirSign, mRotCalc, MoveUnit::Degrees, braking);
 }
 
@@ -255,7 +255,7 @@ void spinTurn(int deg, int v) {
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
   v = constrain(abs(v), 0, 255);
-  float calcMotRot = round(turnToTicks(deg));
+  float calcMotRot = round(turnToTicks(abs(deg)));
   const int vLeft = deg < 0 ? -v : v;
   const int vRight = deg > 0 ? -v : v;
   // unsigned long int startTime = micros();
@@ -268,7 +268,7 @@ void spinTurn(int deg, int v) {
     long eml = encMotorLeftCount - emlPrev;
     long emr = encMotorRightCount - emrPrev;
     interrupts();
-    if ((abs(eml) + abs(emr)) / 2 >= abs(calcMotRot)) break;
+    if ((abs(eml) + abs(emr)) / 2 >= calcMotRot) break;
     float syncError = advmotctrls::getErrorSyncMotors(eml, emr, vLeft, vRight); // Найдите ошибку в управлении двигателей
     pidChassisSync.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
     float syncU = pidChassisSync.compute(-syncError); // Получить управляющее воздействие от регулятора
@@ -280,6 +280,19 @@ void spinTurn(int deg, int v) {
   // int dir = (v > 0) ? 1 : -1;
   // chassisBreakStop(dir);
   chassisHoldStop(100);
+}
+
+// Float map
+float floatMap(float x, float in_min, float in_max, float out_min, float out_max) {
+  if (in_max == in_min) return out_min;
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+// Нормализация значения отражения в диапазон
+float normalizingReflectionRawValue(int refRawVal, int bRefRawVal, int wRefRawVal) {
+  float refVal = floatMap(refRawVal, bRefRawVal, wRefRawVal, 0.0, 255.0);
+  refVal = constrain(refVal, 0.0, 255.0);
+  return refVal;
 }
 
 // Прерывание таймера 2 на канал А (3 и 11 пины)
