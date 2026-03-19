@@ -92,44 +92,6 @@ void rightEncoderInterrupt() {
   updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
 }
 
-void setup() {
-  Serial.begin(115200);
-
-  pinMode(MOT_LEFT_ENC_A_PIN, INPUT_PULLUP);
-  pinMode(MOT_LEFT_ENC_B_PIN, INPUT_PULLUP);
-  pinMode(MOT_RIGHT_ENC_A_PIN, INPUT_PULLUP);
-  pinMode(MOT_RIGHT_ENC_B_PIN, INPUT_PULLUP);
-
-  // Настроить прерывания
-  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_A_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
-  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_B_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
-  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_A_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
-  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_B_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
-
-  Timer2.setPeriod(1000);
-  Timer2.enableISR(CHANNEL_A);
-
-  leftMotor.setMinDuty(70);
-  rightMotor.setMinDuty(70);
-  leftMotor.setReverse(false);
-  rightMotor.setReverse(false);
-  leftMotor.setDeadtime(100);
-  rightMotor.setDeadtime(100);
-
-  pidChassisSync.outMin = -255;
-  pidChassisSync.outMax = 255;
-  pidChassisSync.setKp(0.005);
-  pidChassisSync.setKi(0);
-  pidChassisSync.setKd(0.5);
-  
-  chassisLeftMotorPid.outMin = -255;
-  chassisLeftMotorPid.outMax = 255;
-  chassisRightMotorPid.outMin = -255;
-  chassisRightMotorPid.outMax = 255;
-
-  solve();
-}
-
 void chassisSetPwrCommand(float pLeft, float pRight) {
   leftMotor.runSpeed(pLeft);
   rightMotor.runSpeed(pRight);
@@ -285,33 +247,6 @@ void distMove(float dist, int vLeft, int vRight, MotionBraking braking) {
   syncMovement(vLeft * dirSign, vRight * dirSign, mRotCalc, MoveUnit::Degrees, braking);
 }
 
-// void linearDistMove(int value, int v) {
-//   long emlPrev = encMotorLeftCount;
-//   long emrPrev = encMotorRightCount;
-//   float motRotateCalc = round(distanceToTicks(value));
-//   unsigned long int prevTime = micros();
-//   while(true) {
-//     unsigned long currTime = micros();
-//     float dt = (currTime - prevTime) / 1000.0;
-//     prevTime = currTime;
-//     noInterrupts();
-//     long eml = encMotorLeftCount - emlPrev;
-//     long emr = encMotorRightCount - emrPrev;
-//     interrupts();
-//     if ((abs(eml) + abs(emr)) / 2 >= motRotateCalc) break;
-//     float syncError = advmotctrls::getErrorSyncMotors(eml, emr, v, v); // Найдите ошибку в управлении двигателей
-//     pidChassisSync.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-//     float syncU = pidChassisSync.compute(-syncError); // Получить управляющее воздействие от регулятора
-//     advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
-//     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-//     // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU) + "\t" + String(powers.pwrLeft) + "\t" + String(powers.pwrRight));
-//     pauseUntilTimeUs(currTime, 1000);
-//   }
-//   // int dir = (v > 0) ? 1 : -1;
-//   // chassisBreakStop(dir);
-//   chassisHoldStop(50);
-// }
-
 void spinTurn(int deg, int v) {
   if (deg == 0 || v == 0) {
     chassisHoldStop(50);
@@ -352,14 +287,55 @@ ISR(TIMER2_A) {
   btn.tick();
 }
 
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(MOT_LEFT_ENC_A_PIN, INPUT_PULLUP);
+  pinMode(MOT_LEFT_ENC_B_PIN, INPUT_PULLUP);
+  pinMode(MOT_RIGHT_ENC_A_PIN, INPUT_PULLUP);
+  pinMode(MOT_RIGHT_ENC_B_PIN, INPUT_PULLUP);
+
+  // Настроить прерывания
+  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_A_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
+  attachInterrupt(digitalPinToInterrupt(MOT_LEFT_ENC_B_PIN), leftEncoderInterrupt, CHANGE); // Стандартное прерывание на левый энкодер
+  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_A_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
+  attachPCINT(digitalPinToPCINT(MOT_RIGHT_ENC_B_PIN), rightEncoderInterrupt, CHANGE); // Дополнительное прерывание на правый энкодер
+
+  Timer2.setPeriod(1000);
+  Timer2.enableISR(CHANNEL_A);
+
+  leftMotor.setMinDuty(70);
+  rightMotor.setMinDuty(70);
+  leftMotor.setReverse(false);
+  rightMotor.setReverse(false);
+  leftMotor.setDeadtime(100);
+  rightMotor.setDeadtime(100);
+
+  pidChassisSync.outMin = -255;
+  pidChassisSync.outMax = 255;
+  pidChassisSync.setKp(0.005);
+  pidChassisSync.setKi(0);
+  pidChassisSync.setKd(0.05);
+  
+  chassisLeftMotorPid.outMin = -255;
+  chassisLeftMotorPid.outMax = 255;
+  chassisRightMotorPid.outMin = -255;
+  chassisRightMotorPid.outMax = 255;
+
+  solve();
+}
+
 void solve() {
   Serial.println("Press to start");
   while (!btn.pressing()) delay(1);
   Serial.println("Start!");
-  // linearDistMove(100, 150);
+  // linearDistMove(100, 255, MotionBraking::Hold);
   // delay(1000);
-  // linearDistMove(100, -150);
-  spinTurn(-90, 255);
+  // linearDistMove(-100, 255, MotionBraking::Hold);
+  // spinTurn(-90, 255);
+  // delay(1000);
+  // spinTurn(90, 255);
+  distMove(500, 100, 255, MotionBraking::Hold);
 }
 
 void loop() {
