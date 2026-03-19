@@ -23,7 +23,7 @@
 #define MOT_RIGHT_PWR_PIN 5
 #define MOT_RIGHT_DIR_PIN 4
 
-#define BTN_PIN 11
+#define BTN_PIN 11 // Модуль кнопки
 
 #define MOTOR_GEAR_RATIO 45 // Соотношение редуктора мотора
 #define MOTOR_ENCODER_MULTIPLIER 4 // Квадратурное умножение
@@ -37,6 +37,19 @@
 
 #define AVG_WINDOW 5 // Количество измерений для усреднения
 
+enum class MoveUnit {
+  Rotations,
+  Degrees,
+  Seconds,
+  MilliSeconds
+};
+
+enum class MotionBraking {
+  Hold,
+  Float,
+  Continue
+};
+
 volatile long encMotorLeftCount = 0; // Cчетчик позиций
 volatile long encMotorRightCount = 0;
 volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
@@ -47,12 +60,14 @@ GyverMotor2<GM2::DIR_PWM> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 
 Button btn(BTN_PIN, INPUT, LOW);
 
-uPID syncChassisPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
-uPID holdStopLeftMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
-uPID holdStopRightMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+uPID pidChassisSync(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+uPID chassisLeftMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+uPID chassisRightMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
 
-static long prevEncLeft = 0, prevEncRight = 0;
-static long prevEncLeftCount = 0, prevEncRightCount = 0;
+// static long prevEncLeft = 0, prevEncRight = 0;
+// static long prevEncLeftCount = 0, prevEncRightCount = 0;
+
+void(* softResetFunc) (void) = 0; // Функция мягкого перезапуска
 
 // Универсальный обработчик считываний с энкодеров
 inline void updateMotorEncoder(const uint8_t pinA, const uint8_t pinB, volatile long* counter, volatile int8_t* lastEncoded) {
@@ -77,11 +92,6 @@ void rightEncoderInterrupt() {
   updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
 }
 
-// Прерывание таймера 2 на канал А (3 и 11 пины)
-ISR(TIMER2_A) {
-  btn.tick();
-}
-
 void setup() {
   Serial.begin(115200);
 
@@ -103,26 +113,19 @@ void setup() {
   rightMotor.setMinDuty(70);
   leftMotor.setReverse(false);
   rightMotor.setReverse(false);
-  leftMotor.setDeadtime(5);
-  rightMotor.setDeadtime(5);
+  leftMotor.setDeadtime(100);
+  rightMotor.setDeadtime(100);
 
-  syncChassisPid.outMin = -255;
-  syncChassisPid.outMax = 255;
-  syncChassisPid.setKp(0.005);
-  syncChassisPid.setKi(0);
-  syncChassisPid.setKd(0.5);
-
-  holdStopLeftMotorPid.outMin = -255;
-  holdStopLeftMotorPid.outMax = 255;
-  holdStopLeftMotorPid.setKp(1);
-  holdStopLeftMotorPid.setKd(0);
-  holdStopLeftMotorPid.setpoint = 0;
-
-  holdStopRightMotorPid.outMin = -255;
-  holdStopRightMotorPid.outMax = 255;
-  holdStopRightMotorPid.setKp(1);
-  holdStopRightMotorPid.setKd(0);
-  holdStopRightMotorPid.setpoint = 0;
+  pidChassisSync.outMin = -255;
+  pidChassisSync.outMax = 255;
+  pidChassisSync.setKp(0.005);
+  pidChassisSync.setKi(0);
+  pidChassisSync.setKd(0.5);
+  
+  chassisLeftMotorPid.outMin = -255;
+  chassisLeftMotorPid.outMax = 255;
+  chassisRightMotorPid.outMin = -255;
+  chassisRightMotorPid.outMax = 255;
 
   solve();
 }
@@ -132,33 +135,45 @@ void chassisSetPwrCommand(float pLeft, float pRight) {
   rightMotor.runSpeed(pRight);
 }
 
-void chassisBreakStop(int dir) {
-  chassisSetPwrCommand(-dir * 255, -dir * 255);
+void chassisBreakStop() {
+  int dirL = leftMotor.getDir();
+  int dirR = rightMotor.getDir();
+  if (dirL == 0 && dirR == 0) { // Если оба стоят — ничего не делаем
+    chassisFloatStop();
+    return;
+  }
+  chassisSetPwrCommand(-dirL * 255, -dirR * 255);
   delay(10);
   chassisFloatStop();
 }
 
-void chassisHoldStop(int brakeTime) {
+void chassisHoldStop(int holdTimeMs) {
+  unsigned long holdTimeUs = holdTimeMs * 1000UL;
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
-
-  unsigned long int startTime = millis();
-  unsigned long int prevTime = millis();
-  while(millis() - startTime <= brakeTime) {
-    unsigned long currTime = millis();
-    float dt = currTime - prevTime;
+  chassisLeftMotorPid.setKp(1);
+  // chassisLeftMotorPid.setKd(0);
+  chassisLeftMotorPid.setpoint = 0;
+  chassisRightMotorPid.setKp(1);
+  // chassisRightMotorPid.setKd(0);
+  chassisRightMotorPid.setpoint = 0;
+  unsigned long int startTime = micros();
+  unsigned long int prevTime = micros();
+  while(micros() - startTime <= holdTimeUs) {
+    unsigned long currTime = micros();
+    float dt = (currTime - prevTime) / 1000.0;
     prevTime = currTime;
     noInterrupts();
     long eml = encMotorLeftCount - emlPrev;
     long emr = encMotorRightCount - emrPrev;
     interrupts();
-    holdStopLeftMotorPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-    holdStopRightMotorPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-    float leftU = holdStopLeftMotorPid.compute(eml); // Получить управляющее воздействие от регулятора
-    float rightU = holdStopRightMotorPid.compute(emr); // Получить управляющее воздействие от регулятора
-    chassisSetPwrCommand(leftU, rightU); // Установить скорости/мощности моторам
-    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(leftU) + "\t" + String(rightU));
-    pauseUntilTime(currTime, 1);
+    chassisLeftMotorPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    chassisRightMotorPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float uLeft = chassisLeftMotorPid.compute(eml); // Получить управляющее воздействие от регулятора
+    float uRight = chassisRightMotorPid.compute(emr); // Получить управляющее воздействие от регулятора
+    chassisSetPwrCommand(uLeft, uRight); // Установить скорости/мощности моторам
+    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(uLeft) + "\t" + String(uRight));
+    pauseUntilTimeUs(currTime, 1000);
   }
   chassisFloatStop();
 }
@@ -168,10 +183,9 @@ void chassisFloatStop() {
   rightMotor.stop();
 }
 
-void pauseUntilTime(unsigned long startTime, unsigned long delay) {
-  if (startTime == 0) startTime = millis();
-  unsigned long endTime = startTime + delay;
-  while (millis() - startTime < delay) delayMicroseconds(100);
+void pauseUntilTimeUs(unsigned long startTimeUs, unsigned long delayUs) {
+  if (startTimeUs == 0) startTimeUs = micros();
+    while (micros() - startTimeUs < delayUs) delayMicroseconds(50);
 }
 
 // Вспомогательная функция расчёта движения на дистанцию в мм
@@ -184,77 +198,158 @@ float turnToTicks(float degrees) {
   return (PI * BASE_LENGTH * degrees / 360.0) * MM_TO_ENC;
 }
 
-void linearDistMove(int value, int v) {
+void syncMovement(int vLeft, int vRight, float value, MoveUnit unit, MotionBraking braking) {
+  if ((vLeft == 0 && vRight == 0) ||
+    ((unit == MoveUnit::Rotations || unit == MoveUnit::Degrees) && value == 0) ||
+    ((unit == MoveUnit::Seconds || unit == MoveUnit::MilliSeconds) && value <= 0)) {
+    chassisHoldStop(50);
+    return;
+  }
+  vLeft = constrain((int) vLeft, -100, 100); // Ограничиваем скорость левого мотора от -100 до 100 и отсекаем дробную часть
+  vRight = constrain((int) vRight, -100, 100); // Ограничиваем скорость правого мотора от -100 до 100 и отсекаем дробную часть
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
-
-  float motRotateCalc = round(distanceToTicks(value));
-
-  unsigned long int prevTime = millis();
-  while(true) {
-    unsigned long currTime = millis();
-    float dt = currTime - prevTime;
+  long targetAngle = 0;
+  unsigned long targetTimeUs = 0;
+  switch (unit) {
+    case MoveUnit::Rotations:
+      targetAngle = value * 360;
+      break;
+    case MoveUnit::Degrees:
+      targetAngle = value;
+      break;
+    case MoveUnit::Seconds:
+      targetTimeUs = value * 1000000UL;
+      break;
+    case MoveUnit::MilliSeconds:
+      targetTimeUs = value * 1000UL;
+      break;
+    default:
+      return;
+  }
+  long emlTarget = vLeft != 0 ? targetAngle : 0;
+  long emrTarget = vRight != 0 ? targetAngle : 0;
+  unsigned long prevTime = micros();
+  unsigned long startTime = prevTime;
+  while (true) {
+    unsigned long currTime = micros();
+    float dt = (currTime - prevTime) / 1000.0f; // Мсек
     prevTime = currTime;
-
-    noInterrupts();
+    // Условие по времени
+    if (targetTimeUs > 0 && (currTime - startTime) >= targetTimeUs) break;
     long eml = encMotorLeftCount - emlPrev;
     long emr = encMotorRightCount - emrPrev;
-    interrupts();
-
-    if ((abs(eml) + abs(emr)) / 2 >= motRotateCalc) break;
-    float syncError = advmotctrls::getErrorSyncMotors(eml, emr, v, v); // Найдите ошибку в управлении двигателей
-    syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-    float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
-    advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
-    chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
-    // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU) + "\t" + String(powers.pwrLeft) + "\t" + String(powers.pwrRight));
-    pauseUntilTime(currTime, 1);
+    // Условие по углу
+    if (targetAngle > 0 && abs(eml) >= abs(emlTarget) && abs(emr) >= abs(emrTarget)) break;
+    float error = advmotctrls::getErrorSyncMotors(eml, emr, vLeft, vRight);
+    pidChassisSync.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float u = pidChassisSync.compute(-error);
+    advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(u, vLeft, vRight);
+    chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight);
+    pauseUntilTimeUs(currTime, 1000);
   }
-  // int dir = (v > 0) ? 1 : -1;
-  // chassisBreakStop(dir);
-  chassisHoldStop(50);
+
+  if (braking == MotionBraking::Hold) {
+    chassisHoldStop(100);
+  } else if (braking == MotionBraking::Float) {
+    chassisFloatStop();
+  } else if (braking == MotionBraking::Continue) {
+    chassisSetPwrCommand(vLeft, vRight);
+  }
 }
+
+void linearDistMove(float dist, int v, MotionBraking braking) {
+  if (v == 0 || dist == 0) {
+    chassisHoldStop(50);
+    return;
+  }
+  if (v < 0) Serial.println("Warning: v is negative (" + String(v) + "). Using absolute value.");
+  v = abs(v); // Модуль скорости
+  int dirSign = (dist > 0) - (dist < 0);
+  long mRotCalc = round(distanceToTicks(abs(dist))); // аналог Math.distanceToTicks
+  syncMovement(v * dirSign, v * dirSign, mRotCalc, MoveUnit::Degrees, braking);
+}
+
+void distMove(float dist, int vLeft, int vRight, MotionBraking braking) {
+  if (dist == 0 || vLeft == 0 || vRight == 0) {
+    chassisHoldStop(50);
+    return;
+  }
+  if (vLeft < 0) Serial.println("Warning: vLeft is negative (" + String(vLeft) + "). Using absolute value.");
+  if (vRight < 0) Serial.println("Warning: vRight is negative (" + String(vRight) + "). Using absolute value.");
+  // Берём модуль
+  vLeft = abs(vLeft);
+  vRight = abs(vRight);
+  int dirSign = (dist > 0) - (dist < 0);
+  long mRotCalc = (long)round(distanceToTicks(abs(dist)));
+  syncMovement(vLeft * dirSign, vRight * dirSign, mRotCalc, MoveUnit::Degrees, braking);
+}
+
+// void linearDistMove(int value, int v) {
+//   long emlPrev = encMotorLeftCount;
+//   long emrPrev = encMotorRightCount;
+//   float motRotateCalc = round(distanceToTicks(value));
+//   unsigned long int prevTime = micros();
+//   while(true) {
+//     unsigned long currTime = micros();
+//     float dt = (currTime - prevTime) / 1000.0;
+//     prevTime = currTime;
+//     noInterrupts();
+//     long eml = encMotorLeftCount - emlPrev;
+//     long emr = encMotorRightCount - emrPrev;
+//     interrupts();
+//     if ((abs(eml) + abs(emr)) / 2 >= motRotateCalc) break;
+//     float syncError = advmotctrls::getErrorSyncMotors(eml, emr, v, v); // Найдите ошибку в управлении двигателей
+//     pidChassisSync.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+//     float syncU = pidChassisSync.compute(-syncError); // Получить управляющее воздействие от регулятора
+//     advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, v, v); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
+//     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
+//     // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU) + "\t" + String(powers.pwrLeft) + "\t" + String(powers.pwrRight));
+//     pauseUntilTimeUs(currTime, 1000);
+//   }
+//   // int dir = (v > 0) ? 1 : -1;
+//   // chassisBreakStop(dir);
+//   chassisHoldStop(50);
+// }
 
 void spinTurn(int deg, int v) {
   if (deg == 0 || v == 0) {
-    chassisFloatStop();
+    chassisHoldStop(50);
     return;
   }
-
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
-
   v = constrain(abs(v), 0, 255);
-
   float calcMotRot = round(turnToTicks(deg));
-
   const int vLeft = deg < 0 ? -v : v;
   const int vRight = deg > 0 ? -v : v;
-
-  unsigned long int prevTime = millis();
-  // unsigned long int startTime = millis();
+  // unsigned long int startTime = micros();
+  unsigned long int prevTime = micros();
   while(true) {
-    unsigned long currTime = millis();
-    float dt = currTime - prevTime;
+    unsigned long currTime = micros();
+    float dt = (currTime - prevTime) / 1000.0;
     prevTime = currTime;
-
     noInterrupts();
     long eml = encMotorLeftCount - emlPrev;
     long emr = encMotorRightCount - emrPrev;
     interrupts();
-
     if ((abs(eml) + abs(emr)) / 2 >= abs(calcMotRot)) break;
     float syncError = advmotctrls::getErrorSyncMotors(eml, emr, vLeft, vRight); // Найдите ошибку в управлении двигателей
-    syncChassisPid.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
-    float syncU = syncChassisPid.compute(-syncError); // Получить управляющее воздействие от регулятора
+    pidChassisSync.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float syncU = pidChassisSync.compute(-syncError); // Получить управляющее воздействие от регулятора
     advmotctrls::MotorsPower powers = advmotctrls::getPwrSyncMotors(syncU, vLeft, vRight); // Узнайте мощность двигателей для регулирования, передав управляющее воздействие
     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight); // Установить скорости/мощности моторам
     // Serial.println(String(eml) + "\t" + String(emr) + "\t" + String(syncError) + "\t" + String(syncU));
-    pauseUntilTime(currTime, 1);
+    pauseUntilTimeUs(currTime, 1000);
   }
   // int dir = (v > 0) ? 1 : -1;
   // chassisBreakStop(dir);
-  chassisHoldStop(5000);
+  chassisHoldStop(100);
+}
+
+// Прерывание таймера 2 на канал А (3 и 11 пины)
+ISR(TIMER2_A) {
+  btn.tick();
 }
 
 void solve() {
@@ -268,7 +363,6 @@ void solve() {
 }
 
 void loop() {
-  
   // static long prevEncLeft = 0, prevEncRight = 0;
   // static long prevEncLeftCount = 0, prevEncRightCount = 0;
   // static long prevTime = 0;
