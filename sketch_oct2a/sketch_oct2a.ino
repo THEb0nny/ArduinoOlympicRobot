@@ -10,6 +10,33 @@
 #include <EncButton.h>
 #include <GyverTimers.h>
 
+enum class MoveUnit {
+  Rotations,
+  Degrees,
+  Seconds,
+  MilliSeconds
+};
+
+enum class MotionBraking {
+  Hold,
+  Float,
+  Continue
+};
+
+enum class AfterLineMotion {
+  Hold,
+  Float,
+  Continue
+};
+
+struct LineFollowParams {
+  float v;
+  float Kp;
+  float Ki;
+  float Kd;
+  float Kf;
+};
+
 // Настройки пинов
 #define MOT_LEFT_ENC_A_PIN 2
 #define MOT_LEFT_ENC_B_PIN 3
@@ -25,6 +52,9 @@
 
 #define BTN_PIN 11 // Модуль кнопки
 
+#define LINE_SENSOR_LEFT_PIN A0 // Пин левого датчика линии
+#define LINE_SENSOR_RIGHT_PIN A1 // Пин правого датчика линии
+
 #define MOTOR_GEAR_RATIO 45 // Соотношение редуктора мотора
 #define MOTOR_ENCODER_MULTIPLIER 4 // Квадратурное умножение
 #define MOTOR_ENCODER_PPR 11 // Количество импульсов на одном канале (A или B) за один оборот
@@ -35,25 +65,21 @@
 
 #define MM_TO_ENC (MOTOR_ENCODER_CPR / (PI * WHEEL_DIAMETR))
 
+#define LINE_SENSOR_LEFT_BLACK_REF_RAW 600 // Сырое значение отражения на чёрном левого датчика линии
+#define LINE_SENSOR_LEFT_WHITE_REF_RAW 350 // Сырое значение отражения на белом левого датчика линии
+
+#define LINE_SENSOR_RIGHT_BLACK_REF_RAW 600 // Сырое значение отражения на чёрном правого датчика линии
+#define LINE_SENSOR_RIGHT_WHITE_REF_RAW 350 // Сырое значение отражения на белом правого датчика линии
+
+#define LINE_FOLLOW_SET_POINT 50 // Значение отражения, по которому нужно следовать по линии одним датчиком
+#define REF_THRESHOLD 45 // Пороговое значение определения перекрёстка
+
 #define AVG_WINDOW 5 // Количество измерений для усреднения
 
-enum class MoveUnit {
-  Rotations,
-  Degrees,
-  Seconds,
-  MilliSeconds
-};
-
-enum class MotionBraking {
-  Hold,
-  Float,
-  Continue
-};
-
-volatile long encMotorLeftCount = 0; // Cчетчик позиций
-volatile long encMotorRightCount = 0;
-volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B
-volatile int8_t motRightLastEncoded = 0;
+volatile long encMotorLeftCount = 0; // Cчетчик позиции энкодера левого мотора
+volatile long encMotorRightCount = 0; // Cчетчик позиции энкодера правого мотора
+volatile int8_t motLeftLastEncoded = 0; // Предыдущий код из A/B энкодера левого мотора
+volatile int8_t motRightLastEncoded = 0; // Предыдущий код из A/B энкодера правого мотора
 
 GyverMotor2<GM2::DIR_PWM> leftMotor(MOT_LEFT_DIR_PIN, MOT_LEFT_PWR_PIN);
 GyverMotor2<GM2::DIR_PWM> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
@@ -61,8 +87,6 @@ GyverMotor2<GM2::DIR_PWM> rightMotor(MOT_RIGHT_DIR_PIN, MOT_RIGHT_PWR_PIN);
 Button btn(BTN_PIN, INPUT, LOW);
 
 uPID pidChassisSync(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
-uPID chassisLeftMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
-uPID chassisRightMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
 
 // static long prevEncLeft = 0, prevEncRight = 0;
 // static long prevEncLeftCount = 0, prevEncRightCount = 0;
@@ -92,11 +116,19 @@ void rightEncoderInterrupt() {
   updateMotorEncoder(MOT_RIGHT_ENC_A_PIN, MOT_RIGHT_ENC_B_PIN, &encMotorRightCount, &motRightLastEncoded); 
 }
 
+// Установить моторам команды мощностей
 void chassisSetPwrCommand(float pLeft, float pRight) {
   leftMotor.runSpeed(pLeft);
   rightMotor.runSpeed(pRight);
 }
 
+// Управление моторами с управляющим сигналом от регулятора и скорости
+void chassisRegulatorSteering(float u, float v) {
+  float pLeft = v + u, pRight = v - u;
+  chassisSetPwrCommand(pLeft, pRight);
+}
+
+// Торможение с противоположным ходом на некоторое время и с последующим высвобождением
 void chassisBreakStop() {
   int dirL = leftMotor.getDir();
   int dirR = rightMotor.getDir();
@@ -109,18 +141,31 @@ void chassisBreakStop() {
   chassisFloatStop();
 }
 
+// Торможение с высвобождением моторов
+void chassisFloatStop() {
+  leftMotor.stop();
+  rightMotor.stop();
+}
+
+// Торможение с ударжанием ПИД регулятором на заданное время
 void chassisHoldStop(int holdTimeMs) {
   unsigned long holdTimeUs = holdTimeMs * 1000UL;
   long emlPrev = encMotorLeftCount;
   long emrPrev = encMotorRightCount;
+  uPID chassisLeftMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+  uPID chassisRightMotorPid(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+  chassisLeftMotorPid.outMin = -255;
+  chassisLeftMotorPid.outMax = 255;
   chassisLeftMotorPid.setKp(1);
   // chassisLeftMotorPid.setKd(0);
   chassisLeftMotorPid.setpoint = 0;
+  chassisRightMotorPid.outMin = -255;
+  chassisRightMotorPid.outMax = 255;
   chassisRightMotorPid.setKp(1);
   // chassisRightMotorPid.setKd(0);
   chassisRightMotorPid.setpoint = 0;
   unsigned long int startTime = micros();
-  unsigned long int prevTime = micros();
+  unsigned long int prevTime = startTime;
   while(micros() - startTime <= holdTimeUs) {
     unsigned long currTime = micros();
     float dt = (currTime - prevTime) / 1000.0;
@@ -140,11 +185,7 @@ void chassisHoldStop(int holdTimeMs) {
   chassisFloatStop();
 }
 
-void chassisFloatStop() {
-  leftMotor.stop();
-  rightMotor.stop();
-}
-
+// Вспомогательная функция для паузы на заданное время от времени старта
 void pauseUntilTimeUs(unsigned long startTimeUs, unsigned long delayUs) {
   if (startTimeUs == 0) startTimeUs = micros();
   while (micros() - startTimeUs < delayUs) delayMicroseconds(50);
@@ -210,7 +251,7 @@ void syncMovement(int vLeft, int vRight, float value, MoveUnit unit, MotionBraki
     chassisSetPwrCommand(powers.pwrLeft, powers.pwrRight);
     pauseUntilTimeUs(currTime, 1000);
   }
-
+  // Действие после движения
   if (braking == MotionBraking::Hold) {
     chassisHoldStop(100);
   } else if (braking == MotionBraking::Float) {
@@ -295,6 +336,54 @@ float normalizingReflectionRawValue(int refRawVal, int bRefRawVal, int wRefRawVa
   return refVal;
 }
 
+// Движение по линии до перекрёстка
+void lineFollowToCrossIntersection(AfterLineMotion actionAfterMotion, LineFollowParams params = LineFollowParams(), bool debug = false) {
+  // Применение параметров
+  // if (params != nullptr) {
+  //   if (params->v >= 0) lineFollowCrossIntersection2SensorV  = abs(params->v);
+  //   if (params->Kp >= 0) lineFollowCrossIntersection2SensorKp = abs(params->Kp);
+  //   if (params->Ki >= 0) lineFollowCrossIntersection2SensorKi = abs(params->Ki);
+  //   if (params->Kd >= 0) lineFollowCrossIntersection2SensorKd = abs(params->Kd);
+  //   if (params->Kf >= 0) lineFollowCrossIntersection2SensorKf = abs(params->Kf);
+  // }
+
+  uPID pidLineFollow(P_ERROR | I_SATURATE | D_ERROR | PID_FORWARD);
+  // Настройка PID
+  pidLineFollow.outMin = -255;
+  pidLineFollow.outMax = 255;
+  pidLineFollow.setKp(params.Kp);
+  pidLineFollow.setKi(params.Ki);
+  pidLineFollow.setKd(params.Kd);
+
+  unsigned long int prevTime = micros();
+  while (true) {
+    unsigned long currTime = micros();
+    float dt = (currTime - prevTime) / 1000.0;
+    prevTime = currTime;
+    int refRawLeftLS = analogRead(LINE_SENSOR_LEFT_PIN);
+    int refRawRightLS = analogRead(LINE_SENSOR_RIGHT_PIN);
+    float refLeftLS = normalizingReflectionRawValue(refRawLeftLS, LINE_SENSOR_LEFT_BLACK_REF_RAW, LINE_SENSOR_LEFT_WHITE_REF_RAW);
+    float refRightLS = normalizingReflectionRawValue(refRawRightLS, LINE_SENSOR_RIGHT_BLACK_REF_RAW, LINE_SENSOR_RIGHT_WHITE_REF_RAW);
+    if (refLeftLS < REF_THRESHOLD && refRightLS < REF_THRESHOLD) break; // Проверка на перекрёсток
+    float error = refLeftLS - refRightLS;
+    pidLineFollow.setDt(dt == 0 ? 1 : dt); // Установить dt регулятору
+    float u = pidLineFollow.compute(-error);
+    chassisRegulatorSteering(u, params.v);
+    if (debug) {
+      Serial.println("refLeftLS: " + String(refLeftLS) + ", refRightLS: " + String(refRightLS) + ", error: " + String(error) + ", u: " + String(u) + "dt: " + String(dt));
+    }
+    pauseUntilTimeUs(currTime, 1000);
+  }
+  // Действие после движения
+  if (actionAfterMotion == AfterLineMotion::Hold) {
+    chassisHoldStop(100);
+  } else if (actionAfterMotion == AfterLineMotion::Float) {
+    chassisFloatStop();
+  } else if (actionAfterMotion == AfterLineMotion::Continue) {
+    chassisSetPwrCommand(params.v, params.v);
+  }
+}
+
 // Прерывание таймера 2 на канал А (3 и 11 пины)
 ISR(TIMER2_A) {
   btn.tick();
@@ -329,11 +418,6 @@ void setup() {
   pidChassisSync.setKp(0.005);
   pidChassisSync.setKi(0);
   pidChassisSync.setKd(0.05);
-  
-  chassisLeftMotorPid.outMin = -255;
-  chassisLeftMotorPid.outMax = 255;
-  chassisRightMotorPid.outMin = -255;
-  chassisRightMotorPid.outMax = 255;
 
   solve();
 }
@@ -348,7 +432,8 @@ void solve() {
   // spinTurn(-90, 255);
   // delay(1000);
   // spinTurn(90, 255);
-  distMove(500, 100, 255, MotionBraking::Hold);
+  // distMove(500, 100, 255, MotionBraking::Hold);
+  // lineFollowToCrossIntersection(AfterLineMotion::Hold, {50, 1.2, 0, 0, 0});
 }
 
 void loop() {
